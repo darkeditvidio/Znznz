@@ -1,4 +1,4 @@
-name: RDP ULTIMATE (مُصلح بالكامل + IP ثابت)
+name: RDP ULTIMATE (مُصلح بالكامل + IP ثابت + معالجة الأخطاء)
 
 on:
   workflow_dispatch:
@@ -6,11 +6,11 @@ on:
 jobs:
   rdp:
     runs-on: windows-2022
-    timeout-minutes: 360  # حد GitHub الأقصى 6 ساعات (سيبقى كما هو)
+    timeout-minutes: 360
 
     steps:
       # =========================================================
-      # 1. تفعيل RDP وإعداد الجدار الناري
+      # 1. تفعيل RDP
       # =========================================================
       - name: تفعيل RDP
         run: |
@@ -21,7 +21,7 @@ jobs:
           Restart-Service TermService -Force
 
       # =========================================================
-      # 2. إنشاء مستخدم مدير بكلمة مرور عشوائية
+      # 2. إنشاء مستخدم RDP
       # =========================================================
       - name: إنشاء مستخدم RDP
         run: |
@@ -33,7 +33,7 @@ jobs:
           echo "RDP_PASSWORD=$password" >> $env:GITHUB_ENV
 
       # =========================================================
-      # 3. استرجاع حالة Tailscale من الكاش (لضمان ثبات الـ IP)
+      # 3. استرجاع Cache الحالة (للحفاظ على الـ IP الثابت)
       # =========================================================
       - name: استرجاع حالة Tailscale من الكاش
         uses: actions/cache@v4
@@ -49,19 +49,14 @@ jobs:
       # =========================================================
       - name: تثبيت Tailscale
         run: |
-          # تحميل المثبت
           curl -L -o tailscale.msi https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi
           if (-not (Test-Path tailscale.msi)) {
             Write-Error "فشل تحميل Tailscale"
             exit 1
           }
-
-          # التثبيت بصمت
           Start-Process msiexec.exe -ArgumentList "/i `"$PWD\tailscale.msi`" /quiet /norestart" -Wait
           Start-Sleep -Seconds 5
           Remove-Item tailscale.msi -Force -ErrorAction SilentlyContinue
-
-          # التحقق من التثبيت
           $tsPath = "$env:ProgramFiles\Tailscale\tailscale.exe"
           if (Test-Path $tsPath) {
             Write-Host "✅ تم تثبيت Tailscale بنجاح"
@@ -71,26 +66,51 @@ jobs:
           }
 
       # =========================================================
-      # 5. الاتصال بـ Tailscale (مع مجلد حالة ثابت)
+      # 5. الاتصال بـ Tailscale + إعادة محاولة جلب الـ IP
       # =========================================================
       - name: الاتصال بـ Tailscale
         run: |
-          # إنشاء مجلد الحالة إن لم يكن موجوداً (لأول مرة)
+          # إنشاء مجلد الحالة إن لم يكن موجوداً
           New-Item -ItemType Directory -Force -Path C:\ts-state
 
           $tsPath = "$env:ProgramFiles\Tailscale\tailscale.exe"
           Write-Host "✅ تم العثور على Tailscale في: $tsPath"
 
-          # الاتصال مع تحديد مجلد الحالة (statedir) لضمان نفس الهوية ونفس الـ IP
-          & $tsPath up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-rdp --statedir="C:\ts-state"
+          # محاولة الاتصال مع إعادة المحاولة في حال الفشل
+          $maxRetries = 5
+          $retryDelay = 10  # ثوانٍ
+          $connected = $false
 
-          # الحصول على عنوان IP
-          $ip = & $tsPath ip -4
-          if (-not $ip) {
-            Write-Error "لم يتم الحصول على IP"
+          for ($i = 1; $i -le $maxRetries; $i++) {
+            Write-Host "محاولة الاتصال رقم $i ..."
+
+            # تشغيل الأمر مع --accept-risk=all لتجاوز أي تحذيرات
+            & $tsPath up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-rdp --statedir="C:\ts-state" --accept-risk=all
+
+            # انتظار قليل لتحديث الحالة
+            Start-Sleep -Seconds 5
+
+            # التحقق من الحالة عبر status
+            $status = & $tsPath status
+            Write-Host "حالة Tailscale: $status"
+
+            # محاولة الحصول على IP
+            $ip = & $tsPath ip -4
+            if ($ip -and $ip -match '^\d+\.\d+\.\d+\.\d+$') {
+              Write-Host "✅ تم الحصول على IP: $ip"
+              echo "TAILSCALE_IP=$ip" >> $env:GITHUB_ENV
+              $connected = $true
+              break
+            } else {
+              Write-Host "⚠️  لم يتم الحصول على IP صالح، إعادة المحاولة بعد $retryDelay ثانية..."
+              Start-Sleep -Seconds $retryDelay
+            }
+          }
+
+          if (-not $connected) {
+            Write-Error "❌ فشل الاتصال بـ Tailscale بعد $maxRetries محاولات."
             exit 1
           }
-          echo "TAILSCALE_IP=$ip" >> $env:GITHUB_ENV
 
       # =========================================================
       # 6. عرض بيانات الدخول والبقاء شغالاً
@@ -103,11 +123,9 @@ jobs:
           Write-Host "المستخدم: Admin"
           Write-Host "كلمة المرور: $env:RDP_PASSWORD"
           Write-Host "====================================================="
-          Write-Host "⚠️  ملاحظة: الـ IP ثابت ولن يتغير عند إعادة التشغيل"
-          Write-Host "    بفضل حفظ حالة Tailscale في الـ Cache."
+          Write-Host "⚠️  الـ IP ثابت ولا يتغير عند إعادة التشغيل بفضل الكاش."
           Write-Host "====================================================="
 
-          # البقاء شغالاً حتى إلغاء التنفيذ يدوياً
           while ($true) {
             Write-Host "[$(Get-Date)] RDP نشط على IP: $env:TAILSCALE_IP ..."
             Start-Sleep -Seconds 300
