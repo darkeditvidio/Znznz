@@ -1,0 +1,51 @@
+name: RDP ULTIMATE (6 ساعات)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  rdp:
+    runs-on: windows-2022
+    timeout-minutes: 360  # 6 ساعات كحد أقصى
+
+    steps:
+      - name: تجهيز RDP وتحسين الأداء
+        run: |
+          # تفعيل سطح المكتب البعيد
+          Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" -Name "SecurityLayer" -Value 0 -Force
+          netsh advfirewall firewall add rule name="RDP" dir=in action=allow protocol=TCP localport=3389
+          Restart-Service TermService -Force
+          
+          # إنشاء مستخدم مدير
+          $pass = "P@ss" + (Get-Random -Maximum 9999)
+          $sec = ConvertTo-SecureString $pass -AsPlainText -Force
+          New-LocalUser -Name "Admin" -Password $sec -AccountNeverExpires
+          Add-LocalGroupMember -Group "Administrators" -Member "Admin"
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "Admin"
+          echo "PASSWORD=$pass" >> $env:GITHUB_ENV
+
+      - name: تثبيت Tailscale
+        run: |
+          curl -L -o tailscale.msi https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi
+          msiexec /i tailscale.msi /quiet
+          rm tailscale.msi
+
+      - name: الاتصال بـ Tailscale
+        run: |
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-rdp
+          $ip = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+          echo "IP=$ip" >> $env:GITHUB_ENV
+
+      - name: عرض بيانات الدخول
+        run: |
+          Write-Host "========================================"
+          Write-Host "✅ RDP شغال الآن (لمدة 6 ساعات فقط)"
+          Write-Host "العنوان: $env:IP"
+          Write-Host "المستخدم: Admin"
+          Write-Host "كلمة المرور: $env:PASSWORD"
+          Write-Host "========================================"
+          Write-Host "⚠️  ينتهي بعد 6 ساعات!"
+          Write-Host "للحصول على RDP دائم، استخدم السكربت المخصص للـ VPS."
+          while ($true) { Start-Sleep -Seconds 300 }
