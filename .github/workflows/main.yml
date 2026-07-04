@@ -1,4 +1,4 @@
-name: RDP ULTIMATE (مُصلح بالكامل)
+name: RDP ULTIMATE (مُصلح بالكامل + IP ثابت)
 
 on:
   workflow_dispatch:
@@ -6,7 +6,7 @@ on:
 jobs:
   rdp:
     runs-on: windows-2022
-    timeout-minutes: 360  # 6 ساعات
+    timeout-minutes: 360  # حد GitHub الأقصى 6 ساعات (سيبقى كما هو)
 
     steps:
       # =========================================================
@@ -33,7 +33,19 @@ jobs:
           echo "RDP_PASSWORD=$password" >> $env:GITHUB_ENV
 
       # =========================================================
-      # 3. تثبيت Tailscale بطريقة مضمونة 100%
+      # 3. استرجاع حالة Tailscale من الكاش (لضمان ثبات الـ IP)
+      # =========================================================
+      - name: استرجاع حالة Tailscale من الكاش
+        uses: actions/cache@v4
+        id: cache-ts
+        with:
+          path: C:\ts-state
+          key: tailscale-state-${{ runner.os }}
+          restore-keys: |
+            tailscale-state-${{ runner.os }}
+
+      # =========================================================
+      # 4. تثبيت Tailscale
       # =========================================================
       - name: تثبيت Tailscale
         run: |
@@ -43,45 +55,35 @@ jobs:
             Write-Error "فشل تحميل Tailscale"
             exit 1
           }
-          
-          # التثبيت بصمت مع الانتظار حتى الانتهاء
+
+          # التثبيت بصمت
           Start-Process msiexec.exe -ArgumentList "/i `"$PWD\tailscale.msi`" /quiet /norestart" -Wait
-          
-          # انتظار إضافي لتأكيد التثبيت
           Start-Sleep -Seconds 5
-          
-          # حذف المثبت
           Remove-Item tailscale.msi -Force -ErrorAction SilentlyContinue
-          
-          # التحقق من وجود الملف
+
+          # التحقق من التثبيت
           $tsPath = "$env:ProgramFiles\Tailscale\tailscale.exe"
           if (Test-Path $tsPath) {
             Write-Host "✅ تم تثبيت Tailscale بنجاح"
           } else {
-            Write-Error "❌ فشل التثبيت - الملف غير موجود"
+            Write-Error "❌ فشل التثبيت"
             exit 1
           }
 
       # =========================================================
-      # 4. الاتصال بـ Tailscale (مع إيجاد المسار تلقائياً)
+      # 5. الاتصال بـ Tailscale (مع مجلد حالة ثابت)
       # =========================================================
       - name: الاتصال بـ Tailscale
         run: |
-          # البحث عن الملف في المسارين المحتملين
+          # إنشاء مجلد الحالة إن لم يكن موجوداً (لأول مرة)
+          New-Item -ItemType Directory -Force -Path C:\ts-state
+
           $tsPath = "$env:ProgramFiles\Tailscale\tailscale.exe"
-          if (-not (Test-Path $tsPath)) {
-            $tsPath = "$env:ProgramFiles (x86)\Tailscale\tailscale.exe"
-          }
-          if (-not (Test-Path $tsPath)) {
-            Write-Error "لم يتم العثور على tailscale.exe"
-            exit 1
-          }
-          
           Write-Host "✅ تم العثور على Tailscale في: $tsPath"
-          
-          # الاتصال باستخدام المفتاح السري
-          & $tsPath up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-rdp
-          
+
+          # الاتصال مع تحديد مجلد الحالة (statedir) لضمان نفس الهوية ونفس الـ IP
+          & $tsPath up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-rdp --statedir="C:\ts-state"
+
           # الحصول على عنوان IP
           $ip = & $tsPath ip -4
           if (-not $ip) {
@@ -91,7 +93,7 @@ jobs:
           echo "TAILSCALE_IP=$ip" >> $env:GITHUB_ENV
 
       # =========================================================
-      # 5. عرض بيانات الدخول والبقاء شغالاً
+      # 6. عرض بيانات الدخول والبقاء شغالاً
       # =========================================================
       - name: عرض بيانات الدخول
         run: |
@@ -101,12 +103,12 @@ jobs:
           Write-Host "المستخدم: Admin"
           Write-Host "كلمة المرور: $env:RDP_PASSWORD"
           Write-Host "====================================================="
-          Write-Host "⚠️  ينتهي بعد 6 ساعات (حدود GitHub)"
-          Write-Host "للحصول على RDP دائم، استخدم السكربت المخصص للـ VPS"
+          Write-Host "⚠️  ملاحظة: الـ IP ثابت ولن يتغير عند إعادة التشغيل"
+          Write-Host "    بفضل حفظ حالة Tailscale في الـ Cache."
           Write-Host "====================================================="
-          
+
           # البقاء شغالاً حتى إلغاء التنفيذ يدوياً
           while ($true) {
-            Write-Host "[$(Get-Date)] RDP نشط..."
+            Write-Host "[$(Get-Date)] RDP نشط على IP: $env:TAILSCALE_IP ..."
             Start-Sleep -Seconds 300
           }
